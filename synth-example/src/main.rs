@@ -1,9 +1,9 @@
 // A quickly made Hammond organ.
 
-use std::{iter, error};
-use alsa::{seq, pcm};
-use std::ffi::CString;
+use alsa::{pcm, seq};
 use dasp::signal;
+use std::ffi::CString;
+use std::{error, iter};
 
 type Res<T> = Result<T, Box<dyn error::Error>>;
 
@@ -12,19 +12,31 @@ fn connect_midi_source_ports(s: &alsa::Seq, our_port: i32) -> Res<()> {
     let our_id = s.client_id()?;
     let ci = seq::ClientIter::new(&s);
     for client in ci {
-        if client.get_client() == our_id { continue; } // Skip ourselves
+        if client.get_client() == our_id {
+            continue;
+        } // Skip ourselves
         let pi = seq::PortIter::new(&s, client.get_client());
         for port in pi {
             let caps = port.get_capability();
 
             // Check that it's a normal input port
-            if !caps.contains(seq::PortCap::READ) || !caps.contains(seq::PortCap::SUBS_READ) { continue; }
-            if !port.get_type().contains(seq::PortType::MIDI_GENERIC) { continue; }
+            if !caps.contains(seq::PortCap::READ) || !caps.contains(seq::PortCap::SUBS_READ) {
+                continue;
+            }
+            if !port.get_type().contains(seq::PortType::MIDI_GENERIC) {
+                continue;
+            }
 
             // Connect source and dest ports
             let subs = seq::PortSubscribe::empty()?;
-            subs.set_sender(seq::Addr { client: port.get_client(), port: port.get_port() });
-            subs.set_dest(seq::Addr { client: our_id, port: our_port });
+            subs.set_sender(seq::Addr {
+                client: port.get_client(),
+                port: port.get_port(),
+            });
+            subs.set_dest(seq::Addr {
+                client: our_id,
+                port: our_port,
+            });
             println!("Reading from midi input {:?}", port);
             s.subscribe_port(&subs)?;
         }
@@ -86,7 +98,10 @@ fn open_audio_dev() -> Res<(alsa::PCM, u32)> {
         swp.set_start_threshold(bufsize - periodsize)?;
         swp.set_avail_min(periodsize)?;
         p.sw_params(&swp)?;
-        println!("Opened audio output {:?} with parameters: {:?}, {:?}", req_devname, hwp, swp);
+        println!(
+            "Opened audio output {:?} with parameters: {:?}, {:?}",
+            req_devname, hwp, swp
+        );
         hwp.get_rate()?
     };
 
@@ -99,7 +114,17 @@ type SF = i16;
 type SigGen = signal::Sine<signal::ConstHz>;
 
 // Standard Hammond drawbar.
-const BAR_FREQS: [f64; 9] = [16., 5.+1./3., 8., 4., 2.+2./3., 2., 1.+3./5., 1.+1./3., 1.];
+const BAR_FREQS: [f64; 9] = [
+    16.,
+    5. + 1. / 3.,
+    8.,
+    4.,
+    2. + 2. / 3.,
+    2.,
+    1. + 3. / 5.,
+    1. + 1. / 3.,
+    1.,
+];
 
 #[derive(Clone)]
 struct Sig {
@@ -110,7 +135,6 @@ struct Sig {
     baridx: usize,
 }
 
-
 struct Synth {
     sigs: Vec<Option<Sig>>,
     sample_rate: signal::Rate,
@@ -120,22 +144,33 @@ struct Synth {
 
 impl Synth {
     fn add_note(&mut self, note: u8, vol: f64) {
-        let hz = 440. * 2_f64.powf((note as f64 - 69.)/12.);
+        let hz = 440. * 2_f64.powf((note as f64 - 69.) / 12.);
 
         for (baridx, barfreq) in BAR_FREQS.iter().enumerate() {
             let idx = self.sigs.iter().position(|s| s.is_none());
-            let idx = if let Some(idx) = idx { idx } else {
-                println!("Voice overflow!"); return;
+            let idx = if let Some(idx) = idx {
+                idx
+            } else {
+                println!("Voice overflow!");
+                return;
             };
             let hz = self.sample_rate.const_hz(hz * 8. / barfreq);
-            let s = Sig { sig: hz.sine(), note, targetvol: vol, curvol: 0., baridx };
+            let s = Sig {
+                sig: hz.sine(),
+                note,
+                targetvol: vol,
+                curvol: 0.,
+                baridx,
+            };
             self.sigs[idx] = Some(s);
         }
     }
     fn remove_note(&mut self, note: u8) {
         for i in self.sigs.iter_mut() {
             if let &mut Some(ref mut i) = i {
-                if i.note == note { i.targetvol = 0. }
+                if i.note == note {
+                    i.targetvol = 0.
+                }
             }
         }
     }
@@ -163,7 +198,9 @@ impl Iterator for Synth {
         use dasp::{signal::Signal, Sample};
 
         // Mono -> Stereo
-        if let Some(s) = self.stored_sample.take() { return Some(s) };
+        if let Some(s) = self.stored_sample.take() {
+            return Some(s);
+        };
 
         let mut z = 0f64;
         for sig in &mut self.sigs {
@@ -179,14 +216,20 @@ impl Iterator for Synth {
                 if i.curvol != i.targetvol {
                     if i.targetvol == 0. {
                         i.curvol -= 0.002;
-                        if i.curvol <= 0. { remove = true; }
+                        if i.curvol <= 0. {
+                            remove = true;
+                        }
                     } else {
                         i.curvol += 0.002;
-                        if i.curvol >= i.targetvol { i.curvol = i.targetvol; }
+                        if i.curvol >= i.targetvol {
+                            i.curvol = i.targetvol;
+                        }
                     }
                 }
             }
-            if remove { *sig = None };
+            if remove {
+                *sig = None
+            };
         }
         let z = z.min(0.999).max(-0.999);
         let z: Option<SF> = Some(SF::from_sample(z));
@@ -195,19 +238,32 @@ impl Iterator for Synth {
     }
 }
 
-fn write_samples_direct(p: &alsa::PCM, mmap: &mut alsa::direct::pcm::MmapPlayback<SF>, synth: &mut Synth)
-    -> Res<bool> {
-
+fn write_samples_direct(
+    p: &alsa::PCM,
+    mmap: &mut alsa::direct::pcm::MmapPlayback<SF>,
+    synth: &mut Synth,
+) -> Res<bool> {
     if mmap.avail() > 0 {
         // Write samples to DMA area from iterator
         mmap.write(synth);
     }
     use alsa::pcm::State;
     match mmap.status().state() {
-        State::Running => { return Ok(false); }, // All fine
-        State::Prepared => { println!("Starting audio output stream"); p.start()? },
-        State::XRun => { println!("Underrun in audio output stream!"); p.prepare()? },
-        State::Suspended => { println!("Resuming audio output stream"); p.resume()? },
+        State::Running => {
+            return Ok(false);
+        } // All fine
+        State::Prepared => {
+            println!("Starting audio output stream");
+            p.start()?
+        }
+        State::XRun => {
+            println!("Underrun in audio output stream!");
+            p.prepare()?
+        }
+        State::Suspended => {
+            println!("Resuming audio output stream");
+            p.resume()?
+        }
         n @ _ => Err(format!("Unexpected pcm state {:?}", n))?,
     }
     Ok(true) // Call us again, please, there might be more data to write
@@ -227,21 +283,27 @@ fn write_samples_io(p: &alsa::PCM, io: &mut alsa::pcm::IO<SF>, synth: &mut Synth
         io.mmap(avail, |buf| {
             for sample in buf.iter_mut() {
                 *sample = synth.next().unwrap()
-            };
+            }
             buf.len() / 2
         })?;
     }
     use alsa::pcm::State;
     match p.state() {
         State::Running => Ok(false), // All fine
-        State::Prepared => { println!("Starting audio output stream"); p.start()?; Ok(true) },
+        State::Prepared => {
+            println!("Starting audio output stream");
+            p.start()?;
+            Ok(true)
+        }
         State::Suspended | State::XRun => Ok(true), // Recover from this in next round
         n @ _ => Err(format!("Unexpected pcm state {:?}", n))?,
     }
 }
 
 fn read_midi_event(input: &mut seq::Input, synth: &mut Synth) -> Res<bool> {
-    if input.event_input_pending(true)? == 0 { return Ok(false); }
+    if input.event_input_pending(true)? == 0 {
+        return Ok(false);
+    }
     let ev = input.event_input()?;
     // println!("Received: {:?}", ev);
     match ev.get_type() {
@@ -252,20 +314,19 @@ fn read_midi_event(input: &mut seq::Input, synth: &mut Synth) -> Res<bool> {
             } else {
                 synth.add_note(data.note, f64::from(data.velocity + 64) / 2048.);
             }
-        },
+        }
         seq::EventType::Noteoff => {
             let data: seq::EvNote = ev.get_data().unwrap();
             synth.remove_note(data.note);
-        },
+        }
         seq::EventType::Controller => {
             let data: seq::EvCtrl = ev.get_data().unwrap();
             synth.cc(data.param, data.value);
         }
-        _ => {},
+        _ => {}
     }
     Ok(true)
 }
-
 
 fn run() -> Res<()> {
     let (audio_dev, rate) = open_audio_dev()?;
@@ -292,20 +353,30 @@ fn run() -> Res<()> {
     // Direct mode unavailable, use alsa-lib's mmap emulation instead
     let mut io = if mmap.is_err() {
         Some(audio_dev.io_i16()?)
-    } else { None };
+    } else {
+        None
+    };
 
     loop {
         if let Ok(ref mut mmap) = mmap {
-            if write_samples_direct(&audio_dev, mmap, &mut synth)? { continue; }
+            if write_samples_direct(&audio_dev, mmap, &mut synth)? {
+                continue;
+            }
         } else if let Some(ref mut io) = io {
-            if write_samples_io(&audio_dev, io, &mut synth)? { continue; }
+            if write_samples_io(&audio_dev, io, &mut synth)? {
+                continue;
+            }
         }
-        if read_midi_event(&mut midi_input, &mut synth)? { continue; }
+        if read_midi_event(&mut midi_input, &mut synth)? {
+            continue;
+        }
         // Nothing to do, let's sleep until woken up by the kernel.
         alsa::poll::poll(&mut fds, 100)?;
     }
 }
 
 fn main() {
-    if let Err(e) = run() { println!("Error: {}", e); }
+    if let Err(e) = run() {
+        println!("Error: {}", e);
+    }
 }
